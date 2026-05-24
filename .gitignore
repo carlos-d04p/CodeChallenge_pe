@@ -1,0 +1,19 @@
+# Django
+*.log
+local_settings.py
+db.sqlite3
+media/
+staticfiles/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Docker & DB datos locales
+.postgres_data/
+postgres_data/
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
