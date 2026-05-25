@@ -37,6 +37,17 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # Librerías externas obligatorias
+    'rest_framework',
+    'channels',
+    # TUS APLICACIONES MODULARES DEFINITIVAS
+    'apps.accounts',
+    'apps.wallet',
+    'apps.events',
+    'apps.betting',
+    'apps.regulatory',
+    'apps.audit',
+    'apps.analytics',
 ]
 
 MIDDLEWARE = [
