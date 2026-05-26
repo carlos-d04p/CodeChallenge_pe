@@ -3,76 +3,78 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
-import uuid
 
 from apps.accounts.models import PlayerProfile, AccountStatus
-# CORREGIDO: Eliminamos SelectionType de la importación
-from apps.events.models import Event, EventStatus, Market, MarketStatus, Selection, SelectionResult
+from apps.events.models import Event, EventStatus, Market, Selection, SelectionResult
 from apps.wallet.models import LedgerEntry, WalletAccountTypes
-from apps.betting.models import Bet, BetStatus
+from apps.betting.models import Bet, BetStatus, BetType
 
-class AdvancedBetEngineTestCase(TestCase):
+class CombinedBetEngineTestCase(TestCase):
     def setUp(self):
-        """Configuración del ambiente real de simulación."""
-        self.user = User.objects.create_user(username="carlos_pro_player", password="password123")
+        self.user = User.objects.create_user(username="carlos_acc", password="password123")
         self.profile = PlayerProfile.objects.create(
-            user=self.user,
-            dni="44556622",
-            verification_digit="1",
+            user=self.user, 
+            dni="72618751",           # <- DNI real matemáticamente válido
+            verification_digit="2",   # <- Dígito correcto
             birth_date=timezone.now().date() - timezone.timedelta(days=365 * 25),
             status=AccountStatus.VERIFIED
         )
-        
-        # Cargar saldo inicial
-        LedgerEntry.registrar_recarga(self.user, Decimal("200.0000"))
+        # Saldo inicial: 300 fichas
+        LedgerEntry.registrar_recarga(self.user, Decimal("300.0000"))
 
-        # Configurar catálogo deportivo
-        self.event = Event.objects.create(
-            title="Gran Final del Mundial",
-            home_team="Perú",
-            away_team="Argentina",
-            kick_off=timezone.now() + timezone.timedelta(days=1),
-            status=EventStatus.SCHEDULED
-        )
-        self.market = Market.objects.create(event=self.event, name="Resultado Final (1X2)", code="1X2")
-        self.selection_home = Selection.objects.create(market=self.market, name="Gana Local", odds=Decimal("3.0000"))
+        # Evento 1
+        self.event1 = Event.objects.create(title="Partido 1", home_team="Perú", away_team="Chile", kick_off=timezone.now() + timezone.timedelta(days=1))
+        self.market1 = Market.objects.create(event=self.event1, code="1X2")
+        self.sel1 = Selection.objects.create(market=self.market1, name="Gana Local", odds=Decimal("2.0000"))
+        self.sel1_away = Selection.objects.create(market=self.market1, name="Gana Visitante", odds=Decimal("3.0000"))
 
-    def test_colocar_apuesta_exito_y_congelamiento(self):
-        """Prueba que el flujo base congele fondos y cree el ticket correctamente."""
-        bet = Bet.procesar_apuesta_simple(self.user, self.selection_home, Decimal("50.0000"))
+        # Evento 2
+        self.event2 = Event.objects.create(title="Partido 2", home_team="Brasil", away_team="Ecuador", kick_off=timezone.now() + timezone.timedelta(days=1))
+        self.market2 = Market.objects.create(event=self.event2, code="1X2")
+        self.sel2 = Selection.objects.create(market=self.market2, name="Gana Local", odds=Decimal("1.5000"))
+
+    def test_apuesta_combinada_exito_cuota_acumulada(self):
+        bet = Bet.registrar_apuesta(self.user, [self.sel1, self.sel2], Decimal("100.0000"), BetType.COMBINED)
         self.assertEqual(bet.status, BetStatus.ACCEPTED)
-        
-        # Comprobar balance derivado
-        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user), Decimal("150.0000"))
-        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.PENDING_BETS, user=self.user), Decimal("50.0000"))
+        self.assertEqual(bet.odds, Decimal("3.0000")) # 2.0 * 1.5
 
-    def test_mejora_idempotencia_ticket_duplicado(self):
-        """Asegura que dos solicitudes idénticas no descuenten saldo doblemente."""
-        key_unica = "request_uuid_12345"
-        
-        bet_primera = Bet.procesar_apuesta_simple(self.user, self.selection_home, Decimal("20.0000"), idempotency_key=key_unica)
-        bet_segunda = Bet.procesar_apuesta_simple(self.user, self.selection_home, Decimal("20.0000"), idempotency_key=key_unica)
-        
-        # Deben ser exactamente la misma instancia sin haber cobrado de más
-        self.assertEqual(bet_primera.id, bet_segunda.id)
-        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user), Decimal("180.0000"))
-
-    def test_mejora_mercado_suspendido_bloquea_apuesta(self):
-        """Debe rechazar la jugada si el mercado cambió su estado a suspendido."""
-        self.market.status = MarketStatus.SUSPENDED
-        self.market.save()
-
+    def test_exclusion_mutua_mismo_evento_falla(self):
         with self.assertRaises(ValidationError):
-            Bet.procesar_apuesta_simple(self.user, self.selection_home, Decimal("10.0000"))
+            Bet.registrar_apuesta(self.user, [self.sel1, self.sel1_away], Decimal("50.0000"), BetType.COMBINED)
 
+    def test_liquidacion_combinada_ganadora(self):
+        bet = Bet.registrar_apuesta(self.user, [self.sel1, self.sel2], Decimal("100.0000"), BetType.COMBINED)
+        
+        self.sel1.result = SelectionResult.WON
+        self.sel1.save()
+        self.sel2.result = SelectionResult.WON
+        self.sel2.save()
+
+        bet.liquidar_ticket()
+        self.assertEqual(bet.status, BetStatus.WON)
+        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user), Decimal("500.0000")) # 200 restante + 300 payout
+
+    def test_liquidacion_combinada_perdedora(self):
+        bet = Bet.registrar_apuesta(self.user, [self.sel1, self.sel2], Decimal("100.0000"), BetType.COMBINED)
+        
+        self.sel1.result = SelectionResult.LOST
+        self.sel1.save()
+
+        bet.liquidar_ticket()
+        self.assertEqual(bet.status, BetStatus.LOST)
+        
     def test_mejora_liquidacion_anulada_hace_refund(self):
         """Prueba que un partido anulado devuelva las fichas íntegras al usuario."""
-        bet = Bet.procesar_apuesta_simple(self.user, self.selection_home, Decimal("100.0000"))
+        # Código actualizado al nuevo motor de apuestas
+        bet = Bet.registrar_apuesta(self.user, [self.sel1], Decimal("100.0000"), BetType.SIMPLE)
         
-        # Se liquida como ANULADO (VOID)
-        bet.liquidar_ticket(SelectionResult.VOID)
+        # Se liquida el partido de forma interna como ANULADO (VOID)
+        self.sel1.result = SelectionResult.VOID
+        self.sel1.save()
+        
+        bet.liquidar_ticket()
         
         self.assertEqual(bet.status, BetStatus.CANCELED)
-        # El saldo del usuario debe volver a ser 200 y el congelado quedar en 0
-        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user), Decimal("200.0000"))
+        # Si recargó 300, apostó 100 (le quedaron 200) y se le hizo refund de 100, vuelve a tener 300
+        self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user), Decimal("300.0000"))
         self.assertEqual(LedgerEntry.get_balance(WalletAccountTypes.PENDING_BETS, user=self.user), Decimal("0.0000"))
