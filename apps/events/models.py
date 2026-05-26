@@ -2,6 +2,9 @@ from django.db import models
 from django.core.exceptions import ValidationError
 from django.contrib.auth.models import User
 from decimal import Decimal
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+from django.utils import timezone
 
 class EventStatus(models.TextChoices):
     SCHEDULED = 'programado', 'Programado'
@@ -65,18 +68,11 @@ class Market(models.Model):
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='markets')
     name = models.CharField(max_length=100, default="Resultado Final (1X2)")
     code = models.CharField(max_length=20, default="1X2")
-    status = models.CharField(
-        max_length=20,
-        choices=MarketStatus.choices,
-        default=MarketStatus.OPEN
-    )
-    # EXIGENCIA DE LA RÚBRICA CUBIERTA: Margen del operador totalmente configurable
-    operator_margin = models.DecimalField(
-        max_digits=5,
-        decimal_places=4,
-        default=Decimal('0.0500'),
-        help_text="Margen de ganancia de la casa (ej: 0.0500 para 5%)"
-    )
+    status = models.CharField(max_length=20, choices=MarketStatus.choices, default=MarketStatus.OPEN)
+    operator_margin = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('0.0500'))
+    
+    suspended_until = models.DateTimeField(null=True, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -86,6 +82,21 @@ class Market(models.Model):
     def __str__(self):
         return f"{self.name} | {self.event.home_team} vs {self.event.away_team}"
 
+    def suspender_por_incidente(self, segundos=15):
+        self.status = MarketStatus.SUSPENDED
+        self.suspended_until = timezone.now() + timezone.timedelta(seconds=segundos)
+        self.save(update_fields=['status', 'suspended_until'])
+
+    @property
+    def is_betting_allowed(self):
+        if self.status == MarketStatus.SUSPENDED and self.suspended_until:
+            if timezone.now() >= self.suspended_until:
+                self.status = MarketStatus.OPEN
+                self.suspended_until = None
+                self.save(update_fields=['status', 'suspended_until'])
+                return True
+            return False
+        return self.status == MarketStatus.OPEN
 
 class Selection(models.Model):
     market = models.ForeignKey(Market, on_delete=models.CASCADE, related_name='selections')
@@ -107,6 +118,32 @@ class Selection(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+    
+    def actualizar_cuota(self, nueva_cuota: Decimal, user=None):
+        if nueva_cuota <= Decimal('1.0000'):
+            raise ValidationError("Las cuotas comerciales deben ser superiores a 1.0000.")
+        
+        old_odds = self.odds
+        self.odds = nueva_cuota
+        self.save(update_fields=['odds', 'updated_at'])
+        
+        OddsAuditRecord.objects.create(
+            selection=self, old_odds=old_odds, new_odds=nueva_cuota, modified_by=user
+        )
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f"event_{self.market.event.id}",
+                {
+                    "type": "odds_update",
+                    "data": {
+                        "selection_id": self.id,
+                        "old_odds": str(old_odds),
+                        "new_odds": str(nueva_cuota)
+                    }
+                }
+            )
 
     def __str__(self):
         return f"{self.name} @ {self.odds} ({self.get_result_display()})"

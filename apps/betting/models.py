@@ -40,14 +40,14 @@ class Bet(models.Model):
         return f"Ticket #{self.id} | {self.bet_type} | {self.status}"
 
     @classmethod
-    def registrar_apuesta(cls, user, selections, stake: Decimal, bet_type: BetType, idempotency_key: str = None):
+    def registrar_apuesta(cls, user, selection_items, stake: Decimal, bet_type: BetType, idempotency_key: str = None):
         if stake < cls.LIMIT_MIN_STAKE or stake > cls.LIMIT_MAX_STAKE:
             raise ValidationError("Monto fuera de los límites permitidos.")
 
-        if not selections:
+        if not selection_items:
             raise ValidationError("Debe incluir al menos una selección.")
 
-        if bet_type == BetType.SIMPLE and len(selections) > 1:
+        if bet_type == BetType.SIMPLE and len(selection_items) > 1:
             raise ValidationError("Una apuesta simple solo permite una selección.")
 
         with transaction.atomic():
@@ -64,17 +64,25 @@ class Bet(models.Model):
             if profile.status != AccountStatus.VERIFIED:
                 raise ValidationError("Cuenta no verificada.")
 
-            # Validación de selecciones mutuamente excluyentes (mismo partido)
-            event_ids = [sel.market.event.id for sel in selections]
+            event_ids = [item['selection'].market.event.id for item in selection_items]
             if len(event_ids) != len(set(event_ids)):
                 raise ValidationError("No se permiten múltiples selecciones del mismo partido.")
 
             total_odds = Decimal('1.0000')
-            for sel in selections:
-                if sel.market.status != MarketStatus.OPEN:
-                    raise ValidationError("Mercado cerrado o suspendido.")
-                if sel.market.event.status != EventStatus.SCHEDULED or sel.market.event.kick_off <= timezone.now():
-                    raise ValidationError("El evento ya ha iniciado o no está disponible.")
+            for item in selection_items:
+                sel = item['selection']
+                expected_odds = item['expected_odds']
+                
+                if sel.odds != expected_odds:
+                    raise ValidationError(f"La cuota de {sel.name} cambió de {expected_odds} a {sel.odds}. Reconfirme el boleto.")
+
+                # MODIFICACIÓN: Uso de la propiedad perezosa y habilitación de estado LIVE
+                if not sel.market.is_betting_allowed:
+                    raise ValidationError("Mercado suspendido temporalmente por incidente en vivo o cerrado.")
+                
+                if sel.market.event.status not in [EventStatus.SCHEDULED, EventStatus.LIVE]:
+                    raise ValidationError("El evento ya finalizó o no está disponible.")
+                
                 total_odds *= sel.odds
 
             saldo_disponible = LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=user)
@@ -89,8 +97,8 @@ class Bet(models.Model):
                 user=user, stake=stake, odds=total_odds, status=BetStatus.ACCEPTED, bet_type=bet_type, transaction_id=tx_id, idempotency_key=idempotency_key
             )
 
-            for sel in selections:
-                BetSelection.objects.create(bet=bet, selection=sel, odds=sel.odds)
+            for item in selection_items:
+                BetSelection.objects.create(bet=bet, selection=item['selection'], odds=item['selection'].odds)
 
             return bet
 
@@ -114,7 +122,6 @@ class Bet(models.Model):
                 self.status = BetStatus.LOST
                 LedgerEntry.objects.create(user=None, transaction_id=tx_id, account=WalletAccountTypes.SYSTEM_HOUSE, amount=self.stake, direction=EntryDirections.CREDIT)
             else:
-                # Recalcular cuota omitiendo las selecciones anuladas (cuota = 1.0)
                 cuota_efectiva = Decimal('1.0000')
                 for bs in selections_rel:
                     if bs.selection.result == SelectionResult.WON:
