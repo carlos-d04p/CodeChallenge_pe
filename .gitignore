@@ -17,3 +17,6 @@ postgres_data/
 .vscode/
 .idea/
 .DS_Store
+
+# Cache de Hypothesis (Pruebas basadas en propiedades)
+.hypothesis/
