@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15-alpine
@@ -27,6 +25,31 @@ services:
     depends_on:
       - db
       - redis
+    environment:
+      - DEBUG=True
+
+  # NUEVO: Trabajador de Celery que ejecuta las tareas asíncronas
+  celery:
+    build: .
+    command: celery -A config worker -l INFO
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DEBUG=True
+
+  # NUEVO: Celery Beat (El reloj/cron que programa las tareas cada X tiempo)
+  celery-beat:
+    build: .
+    command: celery -A config beat -l INFO
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+      - celery
     environment:
       - DEBUG=True
 
