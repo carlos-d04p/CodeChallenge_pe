@@ -33,6 +33,53 @@ class Bet(models.Model):
     LIMIT_MIN_STAKE = Decimal('1.0000')
     LIMIT_MAX_STAKE = Decimal('1000.0000')
 
+    def ejecutar_cashout(self, odds_actual: Decimal, factor_casa: Decimal = Decimal('0.9500')):
+        """
+        Ejecuta el cierre anticipado calculando el retorno exacto con base en la fórmula:
+        cashout = stake * odds_original / odds_actual * factor_casa
+        """
+        if self.status != BetStatus.ACCEPTED:
+            raise ValidationError("Solo se puede realizar cash-out en apuestas aceptadas y activas.")
+        
+        if odds_actual <= Decimal('1.0000'):
+            raise ValidationError("La cuota actual debe ser mayor a 1.0000.")
+
+        with transaction.atomic():
+            tx_id = uuid.uuid4()
+            
+            # Calcular retorno matemático exacto
+            retorno_cashout = (self.stake * self.odds / odds_actual) * factor_casa
+            # Forzar precisión a 4 decimales
+            retorno_cashout = retorno_cashout.quantize(Decimal('0.0001'))
+
+            # Cambiar estado del ticket
+            self.status = BetStatus.CANCELED
+            self.save(update_fields=['status', 'updated_at'])
+
+            # CONTABILIDAD:
+            # 1. Vaciar el stake original congelado en la cuenta de pendientes (DEBIT)
+            LedgerEntry.objects.create(
+                user=self.user, transaction_id=tx_id, account=WalletAccountTypes.PENDING_BETS, amount=self.stake, direction=EntryDirections.DEBIT
+            )
+
+            # 2. Devolver el valor calculado del cash-out al balance libre del usuario (CREDIT)
+            LedgerEntry.objects.create(
+                user=self.user, transaction_id=tx_id, account=WalletAccountTypes.USER_WALLET, amount=retorno_cashout, direction=EntryDirections.CREDIT
+            )
+
+            # 3. Balancear la diferencia contable contra la cuenta del sistema (SYSTEM_HOUSE)
+            # Si el retorno es menor que el stake, la casa gana la diferencia. Si es mayor, la casa asume el costo.
+            diferencia_casa = self.stake - retorno_cashout
+            if diferencia_casa > 0:
+                LedgerEntry.objects.create(
+                    user=None, transaction_id=tx_id, account=WalletAccountTypes.SYSTEM_HOUSE, amount=diferencia_casa, direction=EntryDirections.CREDIT
+                )
+            elif diferencia_casa < 0:
+                LedgerEntry.objects.create(
+                    user=None, transaction_id=tx_id, account=WalletAccountTypes.SYSTEM_HOUSE, amount=abs(diferencia_casa), direction=EntryDirections.DEBIT
+                )
+
+            return retorno_cashout
     class Meta:
         ordering = ['-created_at']
 
