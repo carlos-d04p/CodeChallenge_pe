@@ -43,8 +43,8 @@ class InPlayBettingTestCase(TestCase):
         self.user = User.objects.create_user(username="carlos_inplay", password="password123")
         self.profile = PlayerProfile.objects.create(
             user=self.user, 
-            dni="17801146",           # <- DNI real matemáticamente válido
-            verification_digit="0",   # <- Dígito correcto
+            dni="72618751",           # <- DNI real matemáticamente válido
+            verification_digit="2",   # <- Dígito correcto
             birth_date=timezone.now().date() - timezone.timedelta(days=365 * 25),
             status=AccountStatus.VERIFIED
         )
@@ -82,8 +82,8 @@ class CashoutBettingTestCase(TestCase):
         self.user = User.objects.create_user(username="carlos_cashout", password="password123")
         self.profile = PlayerProfile.objects.create(
             user=self.user, 
-            dni="77889911",           
-            verification_digit="5",
+            dni="72618751",           # CORRECCIÓN: DNI matemático válido
+            verification_digit="2",   # CORRECCIÓN: Dígito correcto
             birth_date=timezone.now().date() - timezone.timedelta(days=365 * 25),
             status=AccountStatus.VERIFIED
         )
@@ -93,16 +93,10 @@ class CashoutBettingTestCase(TestCase):
         self.market = Market.objects.create(event=self.event, code="1X2")
         self.sel = Selection.objects.create(market=self.market, name="Gana Local", odds=Decimal("2.0000"))
 
-        # El usuario coloca una apuesta inicial de 10 fichas a cuota 2.0
         items = [{'selection': self.sel, 'expected_odds': Decimal('2.0000')}]
         self.bet = Bet.registrar_apuesta(self.user, items, Decimal("10.0000"), BetType.SIMPLE)
 
     def test_ejecutar_cashout_exito_y_balanceo_contable(self):
-        """
-        Fórmula: 10 * 2.0 / 1.5 * 0.95 = 12.6667 (Retorno aproximado a 4 decimales)
-        Saldo inicial tras apostar: 90.0000
-        Saldo final esperado: 90.0000 + 12.6667 = 102.6667
-        """
         odds_actual = Decimal("1.5000")
         factor_casa = Decimal("0.9500")
 
@@ -111,7 +105,6 @@ class CashoutBettingTestCase(TestCase):
         self.assertEqual(retorno, Decimal("12.6667"))
         self.assertEqual(self.bet.status, BetStatus.CANCELED)
 
-        # Verificar saldos en billetera
         saldo_usuario = LedgerEntry.get_balance(WalletAccountTypes.USER_WALLET, user=self.user)
         saldo_pendientes = LedgerEntry.get_balance(WalletAccountTypes.PENDING_BETS, user=self.user)
         
@@ -121,6 +114,5 @@ class CashoutBettingTestCase(TestCase):
     def test_bloqueo_cashout_apuesta_ya_cancelada(self):
         self.bet.ejecutar_cashout(Decimal("1.5000"))
         
-        # Intentar de nuevo sobre el mismo ticket debe fallar
         with self.assertRaises(ValidationError):
             self.bet.ejecutar_cashout(Decimal("1.5000"))
