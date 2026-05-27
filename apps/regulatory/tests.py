@@ -4,7 +4,8 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
 from datetime import timedelta
-
+from django.test import TestCase
+from apps.regulatory.models import ImmutableLog
 from apps.accounts.models import PlayerProfile, AccountStatus
 from apps.regulatory.models import PlayerPlayLimits, AutoExclusionRecord
 
@@ -68,3 +69,22 @@ class ResponsibleGamingTestCase(TestCase):
         # Confirmamos que las variables de cooldown siguen limpias
         self.assertIsNone(self.limits.pending_daily_limit)
         self.assertIsNone(self.limits.cooldown_until)
+
+class CryptographicAuditTestCase(TestCase):
+    def test_deteccion_de_alteracion_de_cadena(self):
+        ImmutableLog.registrar_evento("TEST_1", {"monto": "10.0000"})
+        log_hackeable = ImmutableLog.registrar_evento("TEST_2", {"monto": "20.0000"})
+        ImmutableLog.registrar_evento("TEST_3", {"monto": "30.0000"})
+
+        # Verificación inicial limpia
+        valido, _ = ImmutableLog.verificar_integridad()
+        self.assertTrue(valido)
+
+        # Simular una inyección SQL maliciosa que altera el payload directamente en BD
+        log_hackeable.payload = '{"monto": "999999.0000"}'
+        log_hackeable.save(update_fields=['payload'])
+
+        # El validador debe detectar la rotura del hash inmediatamente
+        cadena_sana, errores = ImmutableLog.verificar_integridad()
+        self.assertFalse(cadena_sana)
+        self.assertTrue(len(errores) > 0)

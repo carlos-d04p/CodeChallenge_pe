@@ -6,7 +6,9 @@ from decimal import Decimal
 from datetime import timedelta
 
 from apps.accounts.models import PlayerProfile, AccountStatus
-
+import hashlib
+import json
+from django.db import models, transaction
 class PlayerPlayLimits(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='play_limits')
     
@@ -123,3 +125,58 @@ class AutoExclusionRecord(models.Model):
         # Si el tiempo ya expiró, se le permite volver a verificación pendiente
         profile.status = AccountStatus.PENDING_VERIFICATION
         profile.save()
+
+class ImmutableLog(models.Model):
+    action = models.CharField(max_length=100)
+    payload = models.TextField()
+    previous_hash = models.CharField(max_length=64, default="")
+    current_hash = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = "Log de Auditoría"
+        verbose_name_plural = "Logs de Auditoría"
+
+    def __str__(self):
+        return f"Log #{self.id} | {self.action}"
+
+    @classmethod
+    def registrar_evento(cls, action: str, payload_dict: dict):
+        with transaction.atomic():
+            last_entry = cls.objects.select_for_update().order_by('-id').first()
+            prev_hash = last_entry.current_hash if last_entry else "0" * 64
+            
+            payload_str = json.dumps(payload_dict, sort_keys=True)
+            
+            hasher = hashlib.sha256()
+            hasher.update((prev_hash + payload_str).encode('utf-8'))
+            curr_hash = hasher.hexdigest()
+            
+            return cls.objects.create(
+                action=action,
+                payload=payload_str,
+                previous_hash=prev_hash,
+                current_hash=curr_hash
+            )
+
+    @classmethod
+    def verificar_integridad(cls):
+        logs = cls.objects.order_by('id')
+        prev_hash = "0" * 64
+        errores = []
+        
+        for log in logs:
+            if log.previous_hash != prev_hash:
+                errores.append(f"Quiebre en ID {log.id}: hash previo no coincide.")
+            
+            hasher = hashlib.sha256()
+            hasher.update((log.previous_hash + log.payload).encode('utf-8'))
+            calculated_hash = hasher.hexdigest()
+            
+            if log.current_hash != calculated_hash:
+                errores.append(f"Alteración en ID {log.id}: payload modificado.")
+            
+            prev_hash = log.current_hash
+            
+        return len(errores) == 0, errores
